@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  verification-adapter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: credebl/verification-adapter:latest
+    container_name: verification-adapter
+    ports:
+      - "8085:8085"
+    environment:
+      - ADAPTER_PORT=8085
+      # For Docker network access to host services, use host.docker.internal (Docker Desktop)
+      # or 172.17.0.1 (Linux Docker) or the actual service hostname
+      - CREDEBL_AGENT_URL=${CREDEBL_AGENT_URL:-http://172.17.0.1:8004}
+      - CREDEBL_API_KEY=${CREDEBL_API_KEY:-supersecret-that-too-16chars}
+      # Upstream verify-service for non-polygon credentials
+      - UPSTREAM_VERIFY_SERVICE=${UPSTREAM_VERIFY_SERVICE:-http://verify-service:8080}
+    networks:
+      - credebl-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:8085/health', (r) => process.exit(r.statusCode === 200 ? 0 : 1))"]
+      interval: 30s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
+networks:
+  credebl-network:
+    external: true
+    name: docker-deployment_default

@@ -1,0 +1,88 @@
+{
+  "educ:1": {
+    "columns": [
+      {"path": "issuer", "encoder": "string"},
+      {"path": "issuanceDate", "encoder": "isodatetime-epoch-base32"},
+      {"path": "credentialSubject.id", "encoder": "string"},
+      {"path": "credentialSubject.name", "encoder": "string"},
+      {"path": "credentialSubject.alumniOf", "encoder": "string"},
+      {"path": "credentialSubject.degree", "encoder": "string"},
+      {"path": "credentialSubject.fieldOfStudy", "encoder": "string"},
+      {"path": "credentialSubject.enrollmentDate", "encoder": "isodate-1900-base32"},
+      {"path": "credentialSubject.graduationDate", "encoder": "isodate-1900-base32"},
+      {"path": "credentialSubject.studentId", "encoder": "string"},
+      {"path": "credentialSubject.gpa", "encoder": "string"},
+      {"path": "credentialSubject.honors", "encoder": "string"},
+      {"path": "proof.type", "encoder": "string"},
+      {"path": "proof.created", "encoder": "isodatetime-epoch-base32"},
+      {"path": "proof.verificationMethod", "encoder": "string"},
+      {"path": "proof.proofPurpose", "encoder": "string"},
+      {"path": "proof.jws", "encoder": "string"}
+    ],
+    "template": {
+      "@context": [
+        "https://www.w3.org/2018/credentials/v1",
+        {
+          "EducationCredential": "https://schema.org/EducationalOccupationalCredential",
+          "name": "https://schema.org/name",
+          "alumniOf": "https://schema.org/alumniOf",
+          "degree": "https://schema.org/educationalCredentialAwarded",
+          "fieldOfStudy": "https://schema.org/programName",
+          "enrollmentDate": "https://schema.org/startDate",
+          "graduationDate": "https://schema.org/endDate",
+          "studentId": "https://schema.org/identifier",
+          "gpa": "https://schema.org/ratingValue",
+          "honors": "https://schema.org/honorificSuffix"
+        }
+      ],
+      "type": ["VerifiableCredential", "EducationCredential"],
+      "credentialSubject": {
+        "type": "EducationCredential"
+      },
+      "proof": {
+        "proofPurpose": "assertionMethod"
+      }
+    }
+  },
+  "empl:1": {
+    "columns": [
+      {"path": "issuer", "encoder": "string"},
+      {"path": "issuanceDate", "encoder": "isodatetime-epoch-base32"},
+      {"path": "credentialSubject.id", "encoder": "string"},
+      {"path": "credentialSubject.employeeName", "encoder": "string"},
+      {"path": "credentialSubject.employerName", "encoder": "string"},
+      {"path": "credentialSubject.jobTitle", "encoder": "string"},
+      {"path": "credentialSubject.department", "encoder": "string"},
+      {"path": "credentialSubject.dateOfJoining", "encoder": "isodate-1900-base32"},
+      {"path": "credentialSubject.employeeId", "encoder": "string"},
+      {"path": "credentialSubject.employmentType", "encoder": "string"},
+      {"path": "proof.type", "encoder": "string"},
+      {"path": "proof.created", "encoder": "isodatetime-epoch-base32"},
+      {"path": "proof.verificationMethod", "encoder": "string"},
+      {"path": "proof.proofPurpose", "encoder": "string"},
+      {"path": "proof.jws", "encoder": "string"}
+    ],
+    "template": {
+      "@context": [
+        "https://www.w3.org/2018/credentials/v1",
+        {
+          "EmploymentCredential": "https://schema.org/EmployeeRole",
+          "employeeName": "https://schema.org/name",
+          "employerName": "https://schema.org/legalName",
+          "jobTitle": "https://schema.org/jobTitle",
+          "department": "https://schema.org/department",
+          "dateOfJoining": "https://schema.org/startDate",
+          "employeeId": "https://schema.org/identifier",
+          "employmentType": "https://schema.org/employmentType"
+        }
+      ],
+      "type": ["VerifiableCredential", "EmploymentCredential"],
+      "credentialSubject": {
+        "type": "EmploymentCredential"
+      },
+      "proof": {
+        "proofPurpose": "assertionMethod"
+      }
+    }
+  }
+}
