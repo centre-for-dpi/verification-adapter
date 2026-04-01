@@ -1,0 +1,10 @@
+{
+  "name": "adapter-jsonld-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "WASM module for URDNA2015 JSON-LD canonicalization via @digitalbazaar/jsonld",
+  "dependencies": {
+    "jsonld": "^8.0.0"
+  }
+}

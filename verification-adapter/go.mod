@@ -6,6 +6,7 @@ require (
 	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.3.0
 	github.com/mr-tron/base58 v1.2.0
 	github.com/piprate/json-gold v0.5.0
+	github.com/tetratelabs/wazero v1.11.0
 	modernc.org/sqlite v1.34.5
 )
 
