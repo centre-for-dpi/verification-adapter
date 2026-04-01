@@ -1,204 +1,196 @@
-# CREDEBL Inji Adapter
+# Verification Adapter
 
-A Node.js service that sits between [Inji Verify](https://docs.mosip.io/inji/inji-verify) and multiple W3C Verifiable Credential verification backends. It auto-detects credential formats (JSON-LD, JSON-XT, PixelPass QR), routes to the appropriate backend based on issuer DID method and proof type, and supports offline verification using cached issuer keys.
+A backend-agnostic verification adapter that sits between any credential verification UI and any W3C-compliant verifier backend, with standards-compliant offline cryptographic verification. Adding a new backend (CREDEBL, walt.id, Inji Verify, or custom) is a JSON config change — no code modification.
 
-## Features
+## Why it matters
 
-- **Multi-backend routing** -- inspects the credential's issuer DID method and proof type to route to either a [CREDEBL](https://docs.credebl.id/docs) agent (credo-ts) or the Inji Verify Service
-- **Format auto-detection** -- accepts raw JSON-LD credentials, [JSON-XT](https://www.npmjs.com/package/jsonxt) compressed URIs, and [@mosip/pixelpass](https://www.npmjs.com/package/@mosip/pixelpass) base45+zlib-encoded QR data
-- **Offline verification** -- caches issuer DID documents and public keys in SQLite, performs local Ed25519/secp256k1 signature verification when upstream services are unreachable
-- **JSON-LD context proxy** -- serves cached W3C and security JSON-LD contexts locally so credential processing doesn't depend on external context servers
+Verification adapters in CREDEBL, walt.id, and MOSIP stacks are coupled to their respective backend APIs — hardcoded endpoints, auth flows, request formats, and DID method routing. When the deployment target changes, the adapter must be rewritten. This adapter treats backends as configuration: a `Backend` interface and `backends.json` file let operators add, remove, or re-prioritise verifier backends without rebuilding the binary.
 
-## Architecture
+Offline verification uses URDNA2015 JSON-LD canonicalization with the W3C Data Integrity two-hash pattern (`SHA256(canon(proofOpts)) || SHA256(canon(doc))`), enabling cryptographic signature verification without network access to any backend.
 
-```txt
-Inji Verify UI  ──▶  NGINX Proxy  ──▶  Verification Adapter (:8085)
-                                            │
-                               ┌────────────┴────────────┐
-                               ▼                         ▼
-                        CREDEBL Agent              Inji Verify Service
-                     (did:polygon,indy,          (did:web,key,jwk +
-                      sov,peer + secp256k1)       Ed25519,RSA,JWS)
-```
+## What it does
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed data flow diagrams.
+| Capability | Detail |
+| --- | --- |
+| Online verification | Routes credentials to the correct backend by DID method, with per-backend auth, request wrapping, and response parsing |
+| Offline verification | Caches issuer public keys via `/sync`, verifies Ed25519 and RSA signatures locally using URDNA2015 canonicalization |
+| Backend routing | `BackendRegistry.Select(didMethod)` — config-driven, priority-ordered |
+| Input decoding | PixelPass (Base45 + zlib), JSON-XT template expansion, raw JSON-LD |
+| DID resolution | did:key (local), did:web (HTTPS), did:polygon (Ethereum RPC) |
+| Proof types | Ed25519Signature2018/2020, EcdsaSecp256k1Signature2019, RsaSignature2018, DataIntegrityProof/eddsa-rdfc-2022 |
 
-## Quick Start
+### Endpoints
 
-### Prerequisites
-
-- Node.js >= 18
-- A running [CREDEBL](https://docs.credebl.id/docs) agent instance (for `did:polygon` and other credo-ts-supported credentials)
-- Inji Verify Service (for `did:web`/`did:key`/`did:jwk` with standard proof types)
-
-### Local
-
-```bash
-npm install
-
-# Online-only adapter (routes to backends)
-node adapter.js
-
-# Offline-capable adapter (recommended -- adds SQLite issuer cache + auto online/offline failover)
-node offline-adapter.js
-```
-
-### Docker
-
-```bash
-docker build -t credebl/verification-adapter .
-docker run -p 8085:8085 \
-  -e CREDEBL_AGENT_URL=http://host.docker.internal:8004 \
-  -e CREDEBL_API_KEY=supersecret-that-too-16chars \
-  -v adapter-cache:/app/cache \
-  credebl/verification-adapter
-```
-
-### Docker Compose
-
-```bash
-docker compose up -d
-```
-
-The compose file expects an external `docker-deployment_default` network (the CREDEBL stack network).
-
-## Configuration
-
-All configuration is via environment variables:
-
-| Variable | Default | Description |
+| Method | Path | Purpose |
 | --- | --- | --- |
-| `ADAPTER_PORT` | `8085` | Port the adapter listens on |
-| `CREDEBL_AGENT_URL` | `http://localhost:8004` | CREDEBL agent base URL |
-| `CREDEBL_API_KEY` | `supersecret-that-too-16chars` | API key for the CREDEBL agent `/agent/token` endpoint |
-| `UPSTREAM_VERIFY_SERVICE` | `http://verify-service:8080` | Inji Verify Service URL |
-| `POLYGON_RPC_URL` | `https://rpc-amoy.polygon.technology` | Polygon RPC endpoint for direct DID resolution |
-| `CACHE_DB` | `./cache/issuer-cache.db` | SQLite database path for the issuer cache |
-| `CACHE_TTL_MS` | `604800000` (7 days) | Cache entry time-to-live in milliseconds |
-| `CONTEXT_PROXY_PORT` | `8086` | JSON-LD context proxy port |
-| `CONTEXTS_DIR` | `./contexts` | Directory containing cached JSON-LD context files |
-| `USE_OFFLINE_ADAPTER` | `true` | Docker: use `offline-adapter.js` instead of `adapter.js` |
-| `RUN_CONTEXT_PROXY` | `true` | Docker: start `context-proxy.js` alongside the adapter |
+| POST | `/v1/verify/vc-verification` | Verify credential (auto online/offline) |
+| POST | `/verify-offline` | Force offline verification |
+| POST | `/sync` | Cache issuer DID(s) for offline use |
+| GET | `/cache` | Cache statistics |
+| GET | `/templates` | JSON-XT templates |
+| GET | `/health` | Per-backend connectivity status |
 
-## API
+## Backend configuration
 
-### Verification
-
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/v1/verify/vc-verification` | Verify a credential (Inji Verify v1 compatible) |
-| `POST` | `/v1/verify/vc-verification/v2` | Verify a credential (v2 format with per-check results) |
-| `POST` | `/verify-offline` | Force offline verification using local cache only |
-
-The verification endpoint accepts multiple input formats in the request body:
-
-- **JSON** -- `{ "verifiableCredentials": [vc] }`, `{ "credential": vc }`, `{ "verifiableCredential": vc }`, or a raw credential object (has `@context`)
-- **JSON-XT URI** -- a `jxt:...` string, either as `text/plain` body or inside a JSON field
-- **PixelPass QR data** -- base45-encoded string (auto-detected and decoded via `@mosip/pixelpass`)
-
-These can be nested: PixelPass data may decode to a JSON-XT URI, which in turn expands to a full JSON-LD credential.
-
-**Example:**
-
-```bash
-curl -X POST http://localhost:8085/v1/verify/vc-verification \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "verifiableCredentials": [{
-      "@context": ["https://www.w3.org/2018/credentials/v1"],
-      "type": ["VerifiableCredential"],
-      "issuer": "did:polygon:0xD3A288...",
-      "credentialSubject": { ... },
-      "proof": { ... }
-    }]
-  }'
-```
-
-**Response:**
+Backends are declared in a JSON file (set `BACKENDS_CONFIG` env var). Without a config file, the adapter falls back to CREDEBL + Inji Verify defaults from legacy env vars.
 
 ```json
 {
-  "verificationStatus": "SUCCESS",
-  "online": true,
-  "backend": "credebl-agent",
-  "vc": { "...decoded credential..." },
-  "verifiableCredential": { "...decoded credential..." }
+  "backends": [
+    {
+      "name": "inji-verify",
+      "url": "http://inji-verify-service:8080",
+      "verifyPath": "/v1/verify/vc-verification",
+      "healthPath": "/v1/verify/actuator/health",
+      "contentType": "application/vc+ld+json",
+      "didMethods": ["did:web", "did:key", "did:jwk"],
+      "successField": "verificationStatus",
+      "successValue": "SUCCESS"
+    },
+    {
+      "name": "waltid-verifier",
+      "url": "http://waltid:7003",
+      "verifyPath": "/openid4vc/verify",
+      "healthPath": "/health",
+      "didMethods": ["did:jwk", "did:web", "did:key"],
+      "wrapField": "vp_token",
+      "successField": "verified"
+    }
+  ]
 }
 ```
 
-### Cache & Sync (offline-adapter only)
+Each entry declares its own auth (`tokenPath`, `apiKey`), request format (`wrapField`, `wrapArray`, `contentType`), response parsing (`successField`, `successValue`), and optional DID resolution (`resolvePath`, `resolveDocField`). Backends are selected in registration order.
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `POST` | `/sync` | Pre-cache issuer DID document(s) for offline use |
-| `GET` | `/cache` | View cache statistics and cached issuers |
-| `GET` | `/templates` | Retrieve loaded JSON-XT templates |
+## Running
 
 ```bash
-# Pre-cache issuers while online
-curl -X POST http://localhost:8085/sync \
-  -H 'Content-Type: application/json' \
-  -d '{"dids": ["did:polygon:0xD3A288e4cCeb5ADE57c5B674475d6728Af3bD9Fd"]}'
+# Local
+go run .
+
+# With backends config
+BACKENDS_CONFIG=./backends.json go run .
+
+# Docker
+docker compose -f docker-compose.test.yml up --build
+./test/smoke.sh
 ```
 
-### Health
+The test compose starts the adapter with `mosipid/inji-verify-service:0.16.0` and `waltid/verifier-api:0.18.2`.
 
-| Method | Path | Description |
-| --- | --- | --- |
-| `GET` | `/health` | Health check with connectivity and cache status |
+### Testing with CREDEBL
 
-## Routing Logic
+CREDEBL is 14+ NestJS microservices (NATS, Redis, PostgreSQL, agent-provisioning, credo-controller, etc.) and has no single Docker image. To test with CREDEBL:
 
-The adapter inspects each credential's issuer DID method and proof type to pick a backend:
+1. Start the full CREDEBL stack from its own docker-compose (`install/docker-deployment/` or [credebl/platform](https://github.com/credebl/platform)).
+2. Ensure the Credo agent is provisioned and listening on port 8004.
+3. The adapter's `backends.json` already includes a `credebl-agent` entry pointing to `http://host.docker.internal:8004`. On Linux Docker (no `host.docker.internal`), use `http://172.17.0.1:8004` or add `extra_hosts: ["host.docker.internal:host-gateway"]` to the adapter service in docker-compose.
+4. Credentials with `did:polygon`, `did:indy`, `did:sov`, or `did:peer` issuers will route to the CREDEBL agent. Other DID methods route to Inji Verify or walt.id.
 
-| Condition | Backend |
-| --- | --- |
-| `did:polygon`, `did:indy`, `did:sov`, `did:peer` | CREDEBL Agent |
-| Proof type `EcdsaSecp256k1Signature2019` | CREDEBL Agent |
-| `did:web`/`did:key`/`did:jwk` with `Ed25519Signature2018`, `RsaSignature2018`, or `JsonWebSignature2020` | Inji Verify Service |
-| Unknown DID method or proof type | Inji Verify Service (fallback) |
+When the CREDEBL agent is unreachable, the adapter falls back to offline verification for those DID methods (CRYPTOGRAPHIC if the issuer is cached, TRUSTED_ISSUER otherwise).
 
-## Offline Mode
+## Testing issuance → verification
 
-The offline-capable adapter (`offline-adapter.js`) automatically switches modes based on connectivity:
+The `test/issue-and-verify` tool generates an Ed25519 keypair, derives a `did:key`, signs a credential with URDNA2015, and verifies it through all three paths:
 
-1. **Connectivity monitoring** -- pings CREDEBL Agent and Inji Verify Service every 30s
-2. **Issuer cache** -- SQLite database (WAL mode) stores DID documents and extracted public keys with configurable TTL
-3. **Local signature verification** -- uses Node.js `crypto` for Ed25519 and secp256k1 signatures
-4. **Trusted issuer fallback** -- when full cryptographic verification isn't possible offline (e.g., `Ed25519Signature2020` requires JSON-LD canonicalization), falls back to structural validation against the cached issuer
-5. **`did:key` self-resolution** -- `did:key` DIDs encode their public key directly, so they never require network access
-6. **Legacy migration** -- automatically migrates from a JSON file cache to SQLite on first run
+```bash
+cd test/issue-and-verify && go run .
+```
 
-Pre-cache issuers using `POST /sync` while online so their credentials can be verified offline later.
-
-## Project Structure
+Output:
 
 ```txt
-├── adapter.js                 # Online-only adapter
-├── offline-adapter.js         # Offline-capable adapter with SQLite cache
-├── context-proxy.js           # JSON-LD context proxy server (port 8086)
-├── contexts/                  # Cached JSON-LD context files
-│   ├── credentials-v1.json    #   W3C Verifiable Credentials v1
-│   ├── did-v1.json            #   DID Core v1
-│   ├── ed25519-2020.jsonld    #   Ed25519Signature2020 suite
-│   ├── security-v2.json       #   Security Vocabulary v2
-│   └── security-v3.json       #   Security Vocabulary v3
-├── templates/
-│   └── jsonxt-templates.json  # JSON-XT templates (educ:1, empl:1)
-├── Dockerfile
-├── docker-compose.yml
-├── ARCHITECTURE.md
-└── package.json
+Direct Inji:     SUCCESS
+Adapter→Inji:    SUCCESS (backend: inji-verify)
+Adapter offline:  SUCCESS (level: CRYPTOGRAPHIC)
 ```
 
-## Dependencies
+Credentials from credissuer.com (Ed25519Signature2020) and Inji Certify (RsaSignature2018) verify through the adapter. Walt.id's `issuer-api:0.18.2` issues `jwt_vc_json` format natively; for `ldp_vc` credentials, sign with json-gold using the walt.id-onboarded keypair.
 
-| Package | Purpose |
+## Testing offline verification
+
+`POST /verify-offline` forces offline mode regardless of backend connectivity. The adapter looks up the issuer's cached public key in SQLite and verifies the signature locally using URDNA2015 canonicalization.
+
+**Prerequisite:** sync the issuer while online so the public key is cached:
+
+```bash
+curl -X POST http://localhost:8085/sync \
+  -H "Content-Type: application/json" \
+  -d '{"did": "did:web:did.credissuer.com:d2bd3fa6-48d4-4f30-8be5-83f4c48fa088"}'
+```
+
+Then verify offline:
+
+```bash
+curl -X POST http://localhost:8085/verify-offline \
+  -H "Content-Type: application/json" \
+  -d @credential.json
+```
+
+### True air-gap test
+
+To simulate a fully disconnected environment, run the adapter with `--network none`:
+
+```bash
+# Copy the SQLite cache from the running adapter
+docker cp adapter:/app/cache/issuer-cache.db /tmp/issuer-cache.db
+
+# Run with no network
+docker run --rm --network none \
+  -v /tmp/issuer-cache.db:/app/cache/issuer-cache.db \
+  adapter-standalone-adapter
+```
+
+### Offline verification levels by network state
+
+| Scenario | Result | Why |
+| --- | --- | --- |
+| `/verify-offline` with network | CRYPTOGRAPHIC | json-gold fetches `@context` URLs over HTTP, canonicalizes, verifies signature |
+| `/verify-offline` after restart, with network | CRYPTOGRAPHIC | json-gold re-fetches contexts (no persistent context cache) |
+| `--network none` (true air-gap) | TRUSTED_ISSUER | Context fetch fails → canonicalization fails → falls back to structural check |
+
+json-gold's `DefaultDocumentLoader` does not bundle W3C contexts — it always fetches over HTTP. In a true air-gap, canonicalization fails for any credential whose `@context` URLs are not reachable, and the adapter falls back to `TRUSTED_ISSUER` (issuer DID matches cache, proof structure valid, but no cryptographic signature check).
+
+For CRYPTOGRAPHIC verification in a true air-gap, the adapter would need pre-cached JSON-LD contexts — either embedded in the binary or loaded from a local file at startup. This is what the WASM module with embedded contexts solved (archived to `~/Projects/2026/adapter-wasm-archive/`), and what Inji Verify's `LocalDocumentLoader` does internally.
+
+## Why Inji Verify rejects some cross-platform credentials and how the adapter handles it
+
+### Content-Type
+
+Inji Verify's `/vc-verification` endpoint passes `@RequestBody String vc` directly to the MOSIP `vcverifier-jar`. When the body is `{"verifiableCredentials": [cred]}` with `Content-Type: application/json`, the library receives the wrapper object as the credential string and fails to parse it. The fix: send the raw credential as the body with `Content-Type: application/vc+ld+json`. The adapter's Inji backend preset does this automatically.
+
+### Unknown types without @context
+
+Inji uses Titanium JSON-LD for context expansion. Custom credential types (e.g. `UniversityDegree`) without an `@context` definition cause `INVALID_LOCAL_CONTEXT`. Adding `{"@vocab": "https://example.org/vocab#"}` to the `@context` array gives unknown terms a fallback IRI.
+
+### Canonicalization output across implementations
+
+All three URDNA2015 implementations produce **identical N-Quads** for the same input document:
+
+| Implementation | Language | Used by |
+| --- | --- | --- |
+| json-gold | Go | This adapter (signing + offline verification) |
+| Titanium JSON-LD + rdf-urdna | Java | Inji Verify (online verification) |
+| @digitalbazaar/jsonld (WASM via Javy/wazero) | JS in WASM | archived |
+
+The divergence that causes verification failures is not in the URDNA2015 algorithm. It is in **what gets canonicalized** (Content-Type causing the wrong string to be parsed) and **what terms are expandable** (missing `@vocab` for custom types). When these are handled correctly, json-gold-signed credentials verify in Inji Verify without modification.
+
+### SD-JWT
+
+The adapter passes SD-JWT credentials (`Content-Type: application/vc+sd-jwt`) through to backends as raw strings — no JSON-LD canonicalization involved. The token body (including trailing `~`) is forwarded with the original content type preserved.
+
+**Working flow:** Inji Verify 0.16.0's SD-JWT verifier (`SdJwtVerifier` in `vcverifier-jar:1.6.0`) resolves the issuer's public key exclusively from the `x5c` claim in the JWT header — an X.509 certificate chain, not a DID. It does not call the `PublicKeyResolverFactory` that the LDP verifier uses for `did:key`/`did:web` resolution. This means:
+
+| Issuer key source | SD-JWT verification |
 | --- | --- |
-| [`@mosip/pixelpass`](https://www.npmjs.com/package/@mosip/pixelpass) | Decode PixelPass QR data (base45 + zlib decompression) |
-| [`jsonxt`](https://www.npmjs.com/package/jsonxt) | Decode JSON-XT compressed credential URIs |
-| [`better-sqlite3`](https://www.npmjs.com/package/better-sqlite3) | SQLite database for offline issuer key cache |
+| `x5c` in JWT header (X.509 cert) | **Works** |
+| `kid` referencing a DID | Does not work (no DID resolution in SD-JWT path) |
 
-## License
+To issue an SD-JWT that Inji Verify accepts: generate an Ed25519 keypair, create a self-signed X.509 certificate, include it in the JWT header as `x5c`, and sign with EdDSA. The trailing `~` is required even with no selective disclosures. Tested end-to-end with `mosipid/inji-verify-service:0.16.0`.
 
-Apache-2.0
+## References
+
+- [W3C RDF Dataset Canonicalization](https://www.w3.org/TR/rdf-canon/)
+- [W3C Verifiable Credentials Data Integrity](https://www.w3.org/TR/vc-data-integrity/)
+- [Node.js Adapter (original but tightly coupled to CREDBL)](./nodejs-credebl-inji-adapter/)
+- [Architecture Documentation](./verification-adapter/ARCHITECTURE.md)

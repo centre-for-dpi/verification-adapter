@@ -1,0 +1,8 @@
+node_modules/
+*.log
+cache/
+*.db
+issuer-cache.json
+
+# LLMs
+.claude

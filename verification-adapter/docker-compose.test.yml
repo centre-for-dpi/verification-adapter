@@ -1,0 +1,179 @@
+# docker-compose.test.yml — Test the standalone adapter against real backends.
+#
+# Starts three verification backends (Inji Verify, walt.id, CREDEBL Agent)
+# and the Go adapter in front of them. The adapter routes by DID method:
+#
+#   did:web, did:key, did:jwk   → inji-verify-service
+#   did:jwk, did:web, did:key   → waltid-verifier (lower priority)
+#   did:polygon, did:indy       → credebl-agent
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up --build
+#   ./test/smoke.sh
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+
+  # ==========================================================================
+  # ADAPTER (the service under test)
+  # ==========================================================================
+
+  adapter:
+    build: .
+    container_name: adapter
+    ports:
+      - "8085:8085"
+    environment:
+      ADAPTER_PORT: "8085"
+      BACKENDS_CONFIG: /app/backends.json
+      CACHE_DB: /app/cache/issuer-cache.db
+      TEMPLATES_PATH: /app/templates/jsonxt-templates.json
+      POLYGON_RPC_URL: "https://polygon-bor-rpc.publicnode.com"
+    volumes:
+      - ./backends.json:/app/backends.json:ro
+      - adapter-cache:/app/cache
+    depends_on:
+      inji-verify-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8085/health"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+    networks:
+      - adapter-net
+
+  # ==========================================================================
+  # BACKEND 1: MOSIP Inji Verify Service
+  # ==========================================================================
+
+  inji-verify-postgres:
+    image: postgres:13
+    container_name: inji-verify-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: inji_verify
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    volumes:
+      - inji-db:/var/lib/postgresql/data
+    networks:
+      - adapter-net
+
+  inji-verify-service:
+    image: mosipid/inji-verify-service:0.16.0
+    container_name: inji-verify-service
+    user: root
+    ports:
+      - "8082:8080"
+    environment:
+      - active_profile_env=default
+      - DATABASE_HOST=inji-verify-postgres
+      - DATABASE_PORT=5432
+      - DATABASE_NAME=inji_verify
+      - DATABASE_SCHEMA=verify
+      - DATABASE_USERNAME=postgres
+      - DATABASE_PASSWORD=postgres
+    depends_on:
+      inji-verify-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/v1/verify/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 10
+    networks:
+      - adapter-net
+
+  # ==========================================================================
+  # BACKEND 2: walt.id Verifier API
+  # ==========================================================================
+
+  waltid-verifier:
+    image: waltid/verifier-api:0.18.2
+    container_name: waltid-verifier
+    ports:
+      - "7003:7003"
+    environment:
+      VERIFIER_API_PORT: "7003"
+      SERVICE_HOST: waltid-verifier
+    volumes:
+      - ./test/waltid-verifier/config:/waltid-verifier-api/config:ro
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:7003/"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+    networks:
+      - adapter-net
+
+  # walt.id Issuer API (for creating test credentials to verify)
+  waltid-issuer:
+    image: waltid/issuer-api:0.18.2
+    container_name: waltid-issuer
+    ports:
+      - "7002:7002"
+    environment:
+      ISSUER_API_PORT: "7002"
+      SERVICE_HOST: waltid-issuer
+    volumes:
+      - ./test/waltid-issuer/config:/waltid-issuer-api/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7002/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    networks:
+      - adapter-net
+
+  # walt.id Wallet API (for OID4VCI credential acceptance)
+  waltid-wallet:
+    image: waltid/wallet-api:0.18.2
+    container_name: waltid-wallet
+    ports:
+      - "7001:7001"
+    environment:
+      WALLET_BACKEND_PORT: "7001"
+      SERVICE_HOST: waltid-wallet
+    volumes:
+      - ./test/waltid-wallet/config:/waltid-wallet-api/config:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7001/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+    networks:
+      - adapter-net
+
+  # ==========================================================================
+  # BACKEND 3: CREDEBL Agent (Credo Controller)
+  #
+  # The CREDEBL agent requires the full CREDEBL microservices stack (NATS,
+  # Redis, PostgreSQL, agent-provisioning, 14+ services). It cannot run
+  # standalone. To test with CREDEBL:
+  #
+  #   1. Start the full CREDEBL stack from install/docker-deployment/
+  #   2. Update backends.json to point credebl-agent URL to the host:
+  #      "url": "http://host.docker.internal:8004"
+  #   3. The adapter will route did:polygon credentials to it.
+  #
+  # If the CREDEBL agent is unreachable, the adapter falls back to offline
+  # verification for those DID methods.
+  # ==========================================================================
+
+volumes:
+  inji-db:
+  adapter-cache:
+
+networks:
+  adapter-net:
+    driver: bridge

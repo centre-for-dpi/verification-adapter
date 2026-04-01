@@ -1,0 +1,27 @@
+{
+  "name": "credebl-inji-adapter",
+  "version": "1.1.0",
+  "description": "Adapter service bridging Inji Verify to CREDEBL for did:polygon credential verification",
+  "main": "adapter.js",
+  "scripts": {
+    "start": "node adapter.js",
+    "dev": "ADAPTER_PORT=8085 node adapter.js"
+  },
+  "keywords": [
+    "credebl",
+    "inji",
+    "verifiable-credentials",
+    "did-polygon",
+    "adapter"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@mosip/pixelpass": "^0.6.0",
+    "better-sqlite3": "^11.0.0",
+    "jsonxt": "^0.0.19"
+  }
+}
