@@ -151,7 +151,7 @@ docker run --rm --network none \
 
 json-gold's `DefaultDocumentLoader` does not bundle W3C contexts — it always fetches over HTTP. In a true air-gap, canonicalization fails for any credential whose `@context` URLs are not reachable, and the adapter falls back to `TRUSTED_ISSUER` (issuer DID matches cache, proof structure valid, but no cryptographic signature check).
 
-For CRYPTOGRAPHIC verification in a true air-gap, the adapter would need pre-cached JSON-LD contexts — either embedded in the binary or loaded from a local file at startup. This is what the WASM module with embedded contexts solved (archived to `~/Projects/2026/adapter-wasm-archive/`), and what Inji Verify's `LocalDocumentLoader` does internally.
+For CRYPTOGRAPHIC verification in a true air-gap, the adapter would need pre-cached JSON-LD contexts — either embedded in the binary or loaded from a local file at startup. This is what the WASM module with embedded contexts solved (archived to [wasm](./verification-adapter/wasm/README.md)), and what Inji Verify's `LocalDocumentLoader` does internally.
 
 ## Why Inji Verify rejects some cross-platform credentials and how the adapter handles it
 
