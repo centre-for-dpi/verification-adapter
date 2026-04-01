@@ -16,7 +16,7 @@ The adapter currently defaults to json-gold (which handles custom contexts via H
 
 ### Build pipeline
 
-```
+```txt
 canonicalize.js                  JS entrypoint: reads stdin, calls jsonld.canonize(), writes stdout
        │
        ▼
@@ -62,7 +62,7 @@ The compiled module is embedded via `//go:embed wasm/canonicalize.wasm` and pre-
 ### Polyfills
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `crypto-shim.js` | Pure-JS SHA-256 replacing Node.js `crypto.createHash("sha256")` used by `rdf-canonize` |
 | `node-stubs.js` | No-op exports for `http`, `https`, `net`, `tls`, `assert`, etc. — modules that `jsonld`'s document loader imports at init time but never calls in WASM |
 | `loader-stub.js` | No-op replacement for `@digitalbazaar/http-client` |
@@ -80,7 +80,7 @@ A custom `documentLoader` serves these from memory. Unrecognised context URLs th
 ## Files
 
 | File | Description |
-|---|---|
+| --- | --- |
 | `canonicalize.wasm` | Compiled WASM binary (2.0 MB) |
 | `canonicalize.js` | JS entrypoint with embedded W3C contexts |
 | `crypto-shim.js` | Pure-JS SHA-256 for QuickJS |
@@ -92,7 +92,7 @@ A custom `documentLoader` serves these from memory. Unrecognised context URLs th
 ## Files in parent directory
 
 | File | Description |
-|---|---|
+| --- | --- |
 | `canonwasm.go` | Go wrapper using wazero + WASI stdin/stdout |
 | `canonwasm_test.go` | Tests: simple doc, deterministic, VC doc, empty doc, WASM-vs-native comparison |
 
