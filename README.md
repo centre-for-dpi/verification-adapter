@@ -168,6 +168,38 @@ docker run --rm --network none \
 
 **SD-JWT works in a true air-gap** because the issuer's public key is embedded in the JWT header as an X.509 certificate (`x5c` claim). No context fetching, no DID resolution, no network access needed. The adapter parses the JWT, extracts the cert, and verifies the EdDSA/ES256/RS256 signature locally. Tested with `docker run --network none`.
 
+### CBOR / MOSIP Claim 169
+
+The adapter also decodes MOSIP Claim 169 QR codes — CBOR-encoded credentials wrapped in COSE_Sign1 and compressed via PixelPass (Base45 + zlib). This is a different format from the JSON-based W3C VCs that the adapter's existing PixelPass path handles.
+
+After Base45 → zlib decompression, the adapter inspects the first byte to determine the payload type:
+
+- `{` (0x7b) or `j` → JSON or JSON-XT URI → existing W3C VC path
+- `0x80`-`0xff` → CBOR → decode COSE_Sign1 → extract Claim 169 map → convert to JSON
+
+The CBOR decoder maps integer keys to field names per the [Claim 169 specification](https://docs.mosip.io/1.2.0/readme/standards-and-specifications/mosip-standards/169-qr-code-specification) (1=fullName, 2=dateOfBirth, 23=UIN, etc.) and outputs a JSON object. Claim 169 credentials are not W3C VCs — they use COSE_Sign1 signatures (RFC 8152), not JSON-LD Data Integrity proofs. COSE signature verification is a separate concern from the adapter's W3C VC verification pipeline.
+
+### Full test results
+
+```txt
+LDP_VC (Ed25519Signature2020)
+  Online (Inji):              SUCCESS (backend: inji-verify)
+  Offline (with network):     SUCCESS [CRYPTOGRAPHIC]
+  Air-gap (--network none):   SUCCESS [TRUSTED_ISSUER]
+                              (context fetch fails, structural check only)
+
+SD-JWT (EdDSA + x5c)
+  Online (Inji):              SUCCESS (backend: inji-verify)
+  Offline (with network):     SUCCESS [CRYPTOGRAPHIC]
+  Air-gap (--network none):   SUCCESS [CRYPTOGRAPHIC]
+                              (x5c cert is self-contained, no network needed)
+
+CBOR / Claim 169
+  PixelPass decode:           Works (CBOR → JSON conversion)
+  VC verification:            N/A (Claim 169 is not a W3C VC —
+                              COSE_Sign1 verification is separate)
+```
+
 ## Why Inji Verify rejects some cross-platform credentials and how the adapter handles it
 
 ### Content-Type

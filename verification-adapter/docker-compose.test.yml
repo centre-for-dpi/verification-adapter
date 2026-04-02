@@ -92,6 +92,30 @@ services:
       - adapter-net
 
   # ==========================================================================
+  # INJI VERIFY UI (QR scanning frontend)
+  # ==========================================================================
+
+  inji-verify-ui:
+    image: mosipid/inji-verify-ui:0.16.0
+    container_name: inji-verify-ui
+    ports:
+      - "3001:8000"
+    environment:
+      - DEFAULT_TITLE=Inji Verify (Adapter)
+      - DEFAULT_LANG=en
+      - VERIFIABLE_CLAIMS_CONFIG_URL=/assets/config.json
+      - VP_SUBMISSION_SUPPORTED=false
+      - DISPLAY_TIMEOUT=120000
+    volumes:
+      - ./test/inji-ui/config.json:/usr/share/nginx/html/assets/config.json:ro
+      - ./test/inji-ui/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - adapter
+      - inji-verify-service
+    networks:
+      - adapter-net
+
+  # ==========================================================================
   # BACKEND 2: walt.id Verifier API
   # ==========================================================================
 

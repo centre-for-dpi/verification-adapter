@@ -2,8 +2,6 @@
 
 ## System context
 
-Deployment/component diagram: what services exist and how they connect at the network level
-
 ```txt
 ┌─────────────────────┐
 │   Verification UI   │  Inji Verify UI, mobile app, curl
@@ -257,6 +255,52 @@ type Backend interface {
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
+## CBOR / Claim 169 decode flow
+
+```txt
+┌──────────────────────────────────────────────────────────────────────┐
+│  Input: PixelPass QR data (Base45 string)                            │
+└──────────────┬───────────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  DecodePixelPass(): Base45 decode → zlib decompress                  │
+│  (shared with JSON/JSON-XT path)                                     │
+└──────────────┬───────────────────────────────────────────────────────┘
+               │
+               ├─ first byte == '{' or 'j'?
+               │   YES → JSON / JSON-XT → existing W3C VC path
+               │
+               │   NO (0x80-0xff) → CBOR
+               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  decodeCBORPayload()                                                 │
+│                                                                      │
+│  1. Try 4-element CBOR array → COSE_Sign1                           │
+│     [protected, unprotected, payload, signature]                     │
+│     → extract payload bstr → decode inner CBOR map                  │
+│                                                                      │
+│  2. Try CBOR tag 18 (CWT) → unwrap → COSE_Sign1                    │
+│                                                                      │
+│  3. Try raw CBOR map (no COSE wrapper)                               │
+└──────────────┬───────────────────────────────────────────────────────┘
+               │
+               ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│  decodeCBORMap(): integer keys → human-readable field names          │
+│                                                                      │
+│  Claim 169 keys: 1=fullName, 2=dateOfBirth, 3=gender,              │
+│  5=email, 6=phone, 23=UIN, 24=VID, ...                              │
+│  CWT claims: 1=iss, 4=exp, 6=iat                                   │
+│  Key 169 = nested Claim 169 payload (expanded inline)               │
+│                                                                      │
+│  Binary values (biometrics) → "[binary:N bytes]" placeholder        │
+│  Output: JSON string                                                 │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+Claim 169 credentials are **not W3C VCs** — they have no `@context`, no `type: VerifiableCredential`, no JSON-LD proof. They use COSE_Sign1 (RFC 8152) for signatures, not Data Integrity proofs. The adapter decodes them to JSON but does not route them through the W3C VC verification pipeline. COSE signature verification is a separate concern.
+
 ## Verification modes
 
 ### Online (LDP_VC)
@@ -313,11 +357,12 @@ First match wins. Inji Verify is registered before walt.id, so `did:web`/`did:ke
 | SD-JWT (EdDSA, x5c in header) | Inji Verify | CRYPTOGRAPHIC | **CRYPTOGRAPHIC** (x5c is self-contained) |
 | SD-JWT (ES256/RS256, x5c) | Inji Verify | CRYPTOGRAPHIC | **CRYPTOGRAPHIC** |
 | SD-JWT (kid/DID, no x5c) | Not supported by Inji 0.16.0 | Not supported | Not supported |
+| CBOR / Claim 169 (COSE_Sign1) | Decode only (not a W3C VC) | Decode only | Decode only |
 | JWT_VC_JSON | walt.id (OID4VP flow) | Not supported | Not supported |
 
 ## Differences from the original Node.js adapter
 
-The [original adapter](../nodejs-credebl-inji-adapter/) is a 1500-line Node.js file hardcoded to CREDEBL Agent and Inji Verify. This standalone adapter preserves the same API surface and routing logic with two intentional changes:
+The [original adapter](../nodejs-credebl-inji-adapter/) is a Node.js file hardcoded to CREDEBL Agent and Inji Verify. This standalone adapter preserves the same API surface and routing logic with two intentional changes:
 
 1. **Content-Type fix.** The original sends `application/json` with `{"verifiableCredentials": [cred]}` to Inji Verify. Inji's controller passes `@RequestBody String vc` to the verifier library — when the body is the wrapper object, parsing fails. The standalone sends the raw credential with `Content-Type: application/vc+ld+json`, matching the delegated-access-poc's approach.
 

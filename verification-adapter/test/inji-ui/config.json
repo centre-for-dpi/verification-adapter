@@ -1,0 +1,61 @@
+{
+  "verifiableClaims": [
+    {
+      "logo": "/assets/cert.png",
+      "name": "Any Credential",
+      "type": "VerifiableCredential",
+      "essential": true,
+      "clientIdScheme": "did",
+      "definition": {
+        "purpose": "Verify any credential via QR scan",
+        "format": {
+          "ldp_vc": {
+            "proof_type": ["Ed25519Signature2020", "Ed25519Signature2018", "RsaSignature2018", "EcdsaSecp256k1Signature2019"]
+          }
+        },
+        "input_descriptors": [{
+          "id": "any-vc",
+          "format": {
+            "ldp_vc": {
+              "proof_type": ["Ed25519Signature2020", "Ed25519Signature2018", "RsaSignature2018", "EcdsaSecp256k1Signature2019"]
+            }
+          },
+          "constraints": {
+            "fields": [{
+              "path": ["$.type"],
+              "filter": {"type": "object", "pattern": "VerifiableCredential"}
+            }]
+          }
+        }]
+      }
+    },
+    {
+      "logo": "/assets/cert.png",
+      "name": "SD-JWT Credential",
+      "type": "SD_JWT",
+      "clientIdScheme": "did",
+      "definition": {
+        "purpose": "Verify SD-JWT credential via QR scan",
+        "format": {
+          "vc+sd-jwt": {
+            "sd-jwt_alg_values": ["EdDSA", "ES256"]
+          }
+        },
+        "input_descriptors": [{
+          "id": "sd-jwt",
+          "format": {
+            "vc+sd-jwt": {
+              "sd-jwt_alg_values": ["EdDSA", "ES256"]
+            }
+          },
+          "constraints": {
+            "fields": [{
+              "path": ["$.vct"],
+              "filter": {"type": "string"}
+            }]
+          }
+        }]
+      }
+    }
+  ]
+}

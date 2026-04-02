@@ -1,15 +1,12 @@
-// decode.go — PixelPass (Base45 + zlib) and JSON-XT decoding.
+// decode.go — PixelPass (Base45 + zlib) and JSON-XT decoding, plus MOSIP
+// Claim 169 (CBOR/CWT) QR code decoding.
 //
 // QR codes issued by MOSIP/CREDEBL encode credentials in a compact binary
-// format: Base45 → zlib → JSON-XT URI → full JSON-LD credential.
+// format. After Base45 → zlib decompression, the payload is either:
+//   - JSON or JSON-XT URI (PixelPass / W3C VC)
+//   - CBOR (MOSIP Claim 169 / CWT)
 //
-// PixelPass decoding is the first stage — it reverses the Base45 + zlib
-// compression applied by @mosip/pixelpass to produce either a JSON string
-// or a JSON-XT URI.
-//
-// JSON-XT decoding is the second stage — it expands a compact URI like
-// "jxt:local:educ:1:field1/field2/..." into a full W3C Verifiable Credential
-// using pre-defined templates.
+// The decoder inspects the first byte to determine which path to take.
 package main
 
 import (
@@ -113,6 +110,13 @@ func DecodePixelPass(encoded string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("decode: zlib: %w", err)
 	}
+
+	// Inspect first byte: CBOR maps start with 0xa0-0xbf or tagged (0xd8).
+	// JSON starts with '{' (0x7b) or 'j' (JSON-XT URI).
+	if len(decompressed) > 0 && isCBOR(decompressed[0]) {
+		return decodeCBORPayload(decompressed)
+	}
+
 	return string(decompressed), nil
 }
 
