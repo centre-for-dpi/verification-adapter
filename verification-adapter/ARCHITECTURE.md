@@ -87,12 +87,19 @@ adapter-standalone/
 │                        Public key extraction: multibase, hex, base58, JWK (Ed25519, secp256k1, RSA).
 ├── decode.go            PixelPass (Base45 + zlib per RFC 9285), JSON-XT template expansion.
 ├── backends.json        Default backend config: inji-verify, waltid-verifier, credebl-agent.
-├── Dockerfile           Multi-stage: golang:1.24-alpine → alpine:3.21. CGO_ENABLED=0.
-├── docker-compose.test.yml   Test stack: adapter + inji-verify + walt.id verifier + walt.id issuer + walt.id wallet.
+├── Dockerfile                Multi-stage: golang:1.24-alpine → alpine:3.21. CGO_ENABLED=0.
+├── docker-compose.test.yml   Test stack: adapter + inji-verify + walt.id verifier/issuer/wallet.
+├── docker-compose.certify-test.yml   Overlay: adds Inji Certify v0.14.0 issuance stack.
 └── test/
     ├── smoke.sh                    Health + connectivity + basic verification checks.
     ├── issue-and-verify/main.go    Signs credential with json-gold, verifies through all paths.
-    └── waltid-verifier/config/     Minimal walt.id verifier configuration.
+    ├── certify-e2e/main.go         Issues VCDM v1.0, v2.0, SD-JWT via Certify Pre-Auth Code,
+    │                               verifies each through Inji Verify direct + adapter.
+    ├── certify-test.sh             Runner: starts Certify stack, waits, runs E2E.
+    ├── certify/                    Certify config: SQL init (3 credential configs), nginx (HTTP+HTTPS),
+    │                               self-signed TLS cert, farmer CSV data, properties.
+    ├── inji-ui/                    Inji Verify UI config + nginx proxy.
+    └── waltid-*/config/            Minimal walt.id verifier/issuer/wallet configuration.
 ```
 
 ## Backend interface
@@ -369,3 +376,78 @@ The [original adapter](../nodejs-credebl-inji-adapter/) is a Node.js file hardco
 2. **Removed Ed25519Signature2020 offline-preference heuristic.** The original forces offline for `did:web`/`did:key` with Ed25519Signature2020 if cached, commenting "Inji Verify can't fetch JSON-LD contexts from w3id.org". With the Content-Type fix, Inji Verify handles these credentials correctly online. The heuristic is no longer needed.
 
 Everything else is preserved: same endpoints, same DID method routing, same offline fallback chain (crypto → trusted-issuer → unknown), same PixelPass + JSON-XT decoding, same sync with DID resolution fallback, same CORS handling.
+
+## Inji Certify integration
+
+`docker-compose.certify-test.yml` adds Inji Certify v0.14.0 for end-to-end issuance → verification testing.
+
+### Stack topology
+
+```txt
+┌─────────────────────────────────────────────────────────────────────┐
+│  certify-e2e (Go test tool, runs on host)                          │
+│                                                                     │
+│  Pre-Auth Code flow:                                                │
+│    POST /pre-authorized-data → credential_offer_uri                 │
+│    GET  /credential-offer-data/{id} → pre-authorized_code           │
+│    POST /oauth/token → access_token + c_nonce                       │
+│    POST /issuance/credential (+ RS256 proof JWT) → VC               │
+└───┬───────────────────────────────────────┬─────────────────────────┘
+    │ :8090                                 │ :8085 / :8082
+    ▼                                       ▼
+┌──────────┐  ┌───────────────┐  ┌─────────┐  ┌──────────────┐
+│  Certify  │←│ certify-nginx │  │ Adapter │  │ Inji Verify  │
+│  :8090    │  │ :80 (HTTP)    │  │ :8085   │  │ :8080        │
+│           │  │ :443 (HTTPS)  │  │         │  │              │
+└──────────┘  └───────────────┘  └─────────┘  └──────────────┘
+                      │                              │
+              ┌───────┴───────┐              ┌───────┴──────┐
+              │ Self-signed   │              │ Imports cert │
+              │ TLS cert for  │              │ into Java    │
+              │ did:web HTTPS │              │ truststore   │
+              └───────────────┘              └──────────────┘
+```
+
+### Credential configurations (seeded in `certify_init.sql`)
+
+| Config ID | Format | Data Model | Template highlights |
+| --- | --- | --- | --- |
+| FarmerCredential | `ldp_vc` | VCDM 1.1 | `issuanceDate`, `expirationDate`, credentials/v1 context |
+| FarmerCredentialV2 | `ldp_vc` | VCDM 2.0 | `validFrom`, `validUntil`, credentials/v2 context, `@vocab` fallback |
+| FarmerCredentialSdJwt | `vc+sd-jwt` | SD-JWT | `vct` identifier, no JSON-LD context, x5c in header |
+
+All three use Ed25519 signing (`CERTIFY_VC_SIGN_ED25519` key alias), `PreAuthDataProviderPlugin` (claims-as-data, no CSV lookup), and `did:web:certify-nginx` as the issuer DID.
+
+### did:web HTTPS resolution
+
+The `did:web` spec mandates HTTPS for non-localhost hosts. Docker-internal hostnames are HTTP-only. The solution:
+
+1. **certify-nginx** serves HTTPS on port 443 with a self-signed certificate (generated in `test/certify/certs/`)
+2. **Inji Verify** imports the cert into Java's cacerts truststore via `keytool -importcert` (compose entrypoint override)
+3. **The adapter** tries HTTPS first (with `InsecureSkipVerify` for self-signed certs), falls back to HTTP
+
+### Pre-Auth Code flow (no eSignet dependency)
+
+Certify acts as its own OAuth authorization server (`mosip.certify.authorization.url=${mosip.certify.domain.url}`). The `PreAuthDataProviderPlugin` uses claims from the Pre-Auth request directly as credential data — no CSV lookup, no external identity provider.
+
+The `MockCSVDataProviderPlugin` is **incompatible** with Pre-Auth Code flow because it does `claims.get("sub")` → CSV row lookup, but Pre-Auth serializes all claims to JSON in `sub`.
+
+### SD-JWT template constraints
+
+The SD-JWT template must NOT include `iss`, `iat`, `exp` — Certify adds these automatically. Including them causes `SDObjectBuilder` to conflict with reserved JWT claim names, resulting in `Failed to parse SD-Claims`.
+
+### Physical QR code testing
+
+LDP_VC credentials (1882–2244 bytes) compress to 1715–1853 chars via PixelPass (Base45 + zlib) and fit in a QR code. SD-JWT credentials (6441 chars) exceed the QR limit due to the embedded x5c certificate chain (2667 bytes DER → 4954 chars base64 in the JWT header).
+
+The Inji Verify UI at `:3001` scans QR codes and routes verification through the adapter via nginx proxy. The `test/inji-ui/nginx.conf` forwards `/v1/verify/vc-verification` to `adapter:8085`.
+
+### Test results
+
+All 12 tests pass (3 formats × 2 verification paths × 2 modes):
+
+| Format | Inji Verify direct | Adapter online | Adapter offline |
+| --- | --- | --- | --- |
+| VCDM v1.0 (ldp_vc) | SUCCESS | SUCCESS | SUCCESS |
+| VCDM v2.0 (ldp_vc) | SUCCESS | SUCCESS | SUCCESS |
+| SD-JWT (vc+sd-jwt) | SUCCESS | SUCCESS | SUCCESS |

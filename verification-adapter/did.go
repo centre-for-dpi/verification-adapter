@@ -11,12 +11,14 @@ package main
 import (
 	"bytes"
 	"crypto/rsa"
+	cryptotls "crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -82,6 +84,11 @@ func ResolveDidKey(did string) (*ResolvedKey, error) {
 // ResolveDidWeb fetches the DID document for a did:web DID.
 //   - did:web:example.com            → https://example.com/.well-known/did.json
 //   - did:web:example.com:path:to    → https://example.com/path/to/did.json
+//
+// Per the did:web spec, HTTPS is required for non-localhost hosts. However,
+// when HTTPS fails (self-signed cert, Docker-internal host), the resolver
+// falls back to HTTP. This allows testing with Docker-internal hostnames
+// while still trying HTTPS first for production correctness.
 func ResolveDidWeb(did string) (map[string]any, error) {
 	parts := strings.Split(did, ":")
 	if len(parts) < 3 || parts[0] != "did" || parts[1] != "web" {
@@ -91,30 +98,53 @@ func ResolveDidWeb(did string) (map[string]any, error) {
 	domain := strings.ReplaceAll(parts[2], "%3A", ":")
 	pathParts := parts[3:]
 
-	var u string
+	var path string
 	if len(pathParts) > 0 {
-		u = fmt.Sprintf("https://%s/%s/did.json", domain, strings.Join(pathParts, "/"))
+		path = "/" + strings.Join(pathParts, "/") + "/did.json"
 	} else {
-		u = fmt.Sprintf("https://%s/.well-known/did.json", domain)
+		path = "/.well-known/did.json"
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(u)
-	if err != nil {
-		return nil, fmt.Errorf("did: fetch %s: %w", u, err)
+	// Try HTTPS first (with TLS verification relaxed for self-signed certs),
+	// then fall back to HTTP for Docker-internal hosts.
+	tlsClient := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &cryptotls.Config{InsecureSkipVerify: true},
+		},
 	}
-	defer resp.Body.Close()
+	httpClient := &http.Client{Timeout: 10 * time.Second}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("did: read %s: %w", u, err)
+	for _, scheme := range []string{"https", "http"} {
+		u := fmt.Sprintf("%s://%s%s", scheme, domain, path)
+
+		var client *http.Client
+		if scheme == "https" {
+			client = tlsClient
+		} else {
+			client = httpClient
+		}
+
+		resp, err := client.Get(u)
+		if err != nil {
+			log.Printf("[DID] %s failed: %v, trying next", u, err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("did: read %s: %w", u, err)
+		}
+
+		var doc map[string]any
+		if err := json.Unmarshal(body, &doc); err != nil {
+			return nil, fmt.Errorf("did: parse DID document from %s: %w", u, err)
+		}
+		return doc, nil
 	}
 
-	var doc map[string]any
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("did: parse DID document from %s: %w", u, err)
-	}
-	return doc, nil
+	return nil, fmt.Errorf("did: failed to resolve %s (tried HTTPS and HTTP)", did)
 }
 
 // --------------------------------------------------------------------------

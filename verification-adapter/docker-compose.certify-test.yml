@@ -1,0 +1,133 @@
+# docker-compose.certify-test.yml — Inji Certify integration test overlay.
+#
+# Use with the base test stack:
+#   docker compose -f docker-compose.test.yml -f docker-compose.certify-test.yml up --build
+#
+# Adds Certify (v0.14.0) issuance services to the existing adapter + Inji Verify
+# + walt.id stack. Certify issues FarmerCredential (Ed25519Signature2020, ldp_vc)
+# via the Pre-Authorized Code flow, which the adapter then verifies.
+#
+# The Certify issuer DID is did:web:certify-nginx — resolved over HTTP within
+# the Docker network. The adapter's /sync endpoint caches the issuer's public
+# key, and /verify-offline verifies the signature cryptographically.
+#
+# Prerequisites:
+#   docker network create mosip_network
+
+services:
+
+  # --------------------------------------------------------------------------
+  # Certify database (separate from inji-verify-postgres)
+  # --------------------------------------------------------------------------
+
+  certify-postgres:
+    image: postgres:15
+    container_name: certify-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - ./test/certify/certify_init.sql:/docker-entrypoint-initdb.d/certify_init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - adapter-net
+
+  # --------------------------------------------------------------------------
+  # Inji Certify (v0.14.0 with CSV Farmer plugin)
+  # --------------------------------------------------------------------------
+
+  certify:
+    image: injistack/inji-certify-with-plugins:0.14.0
+    container_name: certify
+    user: root
+    ports:
+      - "8090:8090"
+    environment:
+      - container_user=mosip
+      - active_profile_env=default, csvdp-farmer
+      - SPRING_CONFIG_NAME=certify
+      - SPRING_CONFIG_LOCATION=/home/mosip/config/
+      - enable_certify_artifactory=false
+      - download_hsm_client=false
+      - mosip_certify_domain_url=http://certify-nginx:80
+    volumes:
+      - ./test/certify/config/certify-default.properties:/home/mosip/config/certify-default.properties
+      - ./test/certify/config/certify-csvdp-farmer.properties:/home/mosip/config/certify-csvdp-farmer.properties
+      - ./test/certify/config/farmer_identity_data.csv:/home/mosip/config/farmer_identity_data.csv
+      - ./test/certify/config/vp_request_config.json:/home/mosip/config/vp_request_config.json
+      - certify-pkcs12:/home/mosip/CERTIFY_PKCS12
+    depends_on:
+      certify-postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8090/v1/certify/actuator/health || exit 1"]
+      interval: 15s
+      timeout: 10s
+      start_period: 120s
+      retries: 10
+    networks:
+      - adapter-net
+
+  # --------------------------------------------------------------------------
+  # Nginx proxy — serves .well-known/did.json and proxies API calls
+  # --------------------------------------------------------------------------
+
+  certify-nginx:
+    image: nginx:stable
+    container_name: certify-nginx
+    ports:
+      - "8091:80"
+      - "8443:443"
+    volumes:
+      - ./test/certify/certify-nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./test/certify/certs/nginx.crt:/etc/nginx/certs/nginx.crt:ro
+      - ./test/certify/certs/nginx.key:/etc/nginx/certs/nginx.key:ro
+      - ./test/certify/config/farmer-context.json:/config/server/farmer-context.json:ro
+      - ./test/certify/config/mimoto-issuers-config.json:/config/server/mimoto-issuers-config.json:ro
+      - ./test/certify/config/mimoto-trusted-verifiers.json:/config/server/mimoto-trusted-verifiers.json:ro
+      - ./test/certify/config/credential-template.html:/config/server/credential-template.html:ro
+      - ./test/certify/config/vp_request_config.json:/config/server/vp_request_config.json:ro
+    depends_on:
+      - certify
+    networks:
+      - adapter-net
+
+  # --------------------------------------------------------------------------
+  # Override: add certify-nginx TLS cert to Inji Verify's Java truststore
+  # so it can resolve did:web:certify-nginx over HTTPS with self-signed cert.
+  # --------------------------------------------------------------------------
+
+  inji-verify-service:
+    volumes:
+      - ./test/certify/certs/nginx.crt:/tmp/certify-nginx.crt:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        keytool -importcert -alias certify-nginx -file /tmp/certify-nginx.crt \
+          -keystore $$JAVA_HOME/lib/security/cacerts -storepass changeit -noprompt 2>/dev/null || true
+        exec java -jar /home/mosip/verify-service.jar
+
+  # --------------------------------------------------------------------------
+  # Override: add certify-nginx TLS cert to adapter's trust store
+  # --------------------------------------------------------------------------
+
+  adapter:
+    volumes:
+      - ./test/certify/certs/nginx.crt:/usr/local/share/ca-certificates/certify-nginx.crt:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        update-ca-certificates 2>/dev/null || true
+        exec /app/adapter
+
+volumes:
+  certify-pkcs12:
+
+# adapter-net is defined in docker-compose.test.yml — this overlay joins it.
+networks:
+  adapter-net:
+    driver: bridge

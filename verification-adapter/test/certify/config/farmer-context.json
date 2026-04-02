@@ -1,0 +1,20 @@
+{
+  "@context": {
+    "@version": 1.1,
+    "FarmerCredential": "https://example.org/vocab#FarmerCredential",
+    "fullName": "https://example.org/vocab#fullName",
+    "mobileNumber": "https://example.org/vocab#mobileNumber",
+    "dateOfBirth": "https://example.org/vocab#dateOfBirth",
+    "gender": "https://example.org/vocab#gender",
+    "state": "https://example.org/vocab#state",
+    "district": "https://example.org/vocab#district",
+    "villageOrTown": "https://example.org/vocab#villageOrTown",
+    "postalCode": "https://example.org/vocab#postalCode",
+    "landArea": "https://example.org/vocab#landArea",
+    "landOwnershipType": "https://example.org/vocab#landOwnershipType",
+    "primaryCropType": "https://example.org/vocab#primaryCropType",
+    "secondaryCropType": "https://example.org/vocab#secondaryCropType",
+    "face": "https://example.org/vocab#face",
+    "farmerID": "https://example.org/vocab#farmerID"
+  }
+}

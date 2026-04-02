@@ -86,12 +86,16 @@ go run .
 # With backends config
 BACKENDS_CONFIG=./backends.json go run .
 
-# Docker
+# Docker (adapter + Inji Verify + walt.id)
 docker compose -f docker-compose.test.yml up --build
 ./test/smoke.sh
+
+# Docker with Inji Certify issuance (adds Certify v0.14.0 + Postgres + nginx)
+docker network create mosip_network 2>/dev/null
+docker compose -f docker-compose.test.yml -f docker-compose.certify-test.yml up --build
 ```
 
-The test compose starts the adapter with `mosipid/inji-verify-service:0.16.0` and `waltid/verifier-api:0.18.2`.
+The test compose starts the adapter with `mosipid/inji-verify-service:0.16.0` and `waltid/verifier-api:0.18.2`. The Certify overlay adds `injistack/inji-certify-with-plugins:0.14.0` for credential issuance testing.
 
 ### Testing with CREDEBL
 
@@ -106,21 +110,146 @@ When the CREDEBL agent is unreachable, the adapter falls back to offline verific
 
 ## Testing issuance → verification
 
+### Self-signed credentials (no external issuer needed)
+
 The `test/issue-and-verify` tool generates an Ed25519 keypair, derives a `did:key`, signs a credential with URDNA2015, and verifies it through all three paths:
 
 ```bash
 cd test/issue-and-verify && go run .
 ```
 
+### Inji Certify issuance (VCDM v1.0, v2.0, SD-JWT)
+
+The `test/certify-e2e` tool issues credentials from Inji Certify v0.14.0 via the Pre-Authorized Code flow and verifies each through Inji Verify directly and the adapter. Three credential formats are tested:
+
+| Config | Format | Data Model | Signature |
+| --- | --- | --- | --- |
+| FarmerCredential | `ldp_vc` | VCDM 1.1 (`issuanceDate`) | Ed25519Signature2020 |
+| FarmerCredentialV2 | `ldp_vc` | VCDM 2.0 (`validFrom`) | Ed25519Signature2020 |
+| FarmerCredentialSdJwt | `vc+sd-jwt` | SD-JWT (x5c) | EdDSA |
+
+```bash
+# Start the full stack (adapter + Inji Verify + Certify)
+docker network create mosip_network 2>/dev/null
+docker compose -f docker-compose.test.yml -f docker-compose.certify-test.yml up --build -d
+
+# Online verification (routes to Inji Verify)
+cd test/certify-e2e && go run . \
+  --adapter http://localhost:8085 \
+  --certify http://localhost:8090/v1/certify \
+  --certify-nginx http://localhost:8091 \
+  --inji-verify http://localhost:8082
+
+# Offline verification (syncs issuer DID, verifies locally)
+go run . \
+  --adapter http://localhost:8085 \
+  --certify http://localhost:8090/v1/certify \
+  --certify-nginx http://localhost:8091 \
+  --inji-verify http://localhost:8082 \
+  --offline
+```
+
 Output:
 
 ```txt
-Direct Inji:     SUCCESS
-Adapter→Inji:    SUCCESS (backend: inji-verify)
-Adapter offline:  SUCCESS (level: CRYPTOGRAPHIC)
+━━━ Test 1: VCDM v1.0 (ldp_vc) ━━━
+  Issued: ldp_vc (1882 bytes)
+  Verify A: Inji Verify direct... SUCCESS
+  Verify B: Adapter (auto)... SUCCESS
+
+━━━ Test 2: VCDM v2.0 (ldp_vc) ━━━
+  Issued: ldp_vc (2244 bytes)
+  Verify A: Inji Verify direct... SUCCESS
+  Verify B: Adapter (auto)... SUCCESS
+
+━━━ Test 3: SD-JWT (vc+sd-jwt) ━━━
+  Issued: vc+sd-jwt (6441 chars)
+  Verify A: Inji Verify direct... SUCCESS
+  Verify B: Adapter (auto)... SUCCESS
+
+═══════════════════════════════
+  Results: 6/6 passed
+═══════════════════════════════
 ```
 
-Credentials from credissuer.com (Ed25519Signature2020) and Inji Certify (RsaSignature2018) verify through the adapter. Walt.id's `issuer-api:0.18.2` issues `jwt_vc_json` format natively; for `ldp_vc` credentials, sign with json-gold using the walt.id-onboarded keypair.
+The Certify issuance uses the Pre-Authorized Code flow with `PreAuthDataProviderPlugin`, which accepts credential claims directly without eSignet. Certify acts as its own OAuth authorization server. The issuer DID is `did:web:certify-nginx`, resolved over HTTPS via a self-signed certificate on the nginx proxy.
+
+### Physical QR code testing (scan with Inji Verify UI)
+
+Issue credentials and generate QR codes for physical scanning:
+
+```bash
+# 1. Issue all three credential formats (saves to /tmp)
+cd test/certify-e2e && go run . \
+  --adapter http://localhost:8085 \
+  --certify http://localhost:8090/v1/certify \
+  --certify-nginx http://localhost:8091 \
+  --inji-verify http://localhost:8082
+
+# 2. Generate PixelPass QR codes (Base45 + zlib compression)
+python3 -c "
+import sys, zlib
+CHARSET = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ \$%*+-./:' 
+def base45_encode(data):
+    result = []
+    for i in range(0, len(data), 2):
+        if i + 1 < len(data):
+            n = data[i] * 256 + data[i+1]
+            c, n = divmod(n, 45*45)
+            b, a = divmod(n, 45)
+            result.extend([CHARSET[a], CHARSET[b], CHARSET[c]])
+        else:
+            b, a = divmod(data[i], 45)
+            result.extend([CHARSET[a], CHARSET[b]])
+    return ''.join(result)
+for name in ['FarmerCredential', 'FarmerCredentialV2']:
+    with open(f'/tmp/certify-{name}.json', 'rb') as f:
+        data = f.read()
+    encoded = base45_encode(zlib.compress(data))
+    with open(f'/tmp/qr-{name}.txt', 'w') as f:
+        f.write(encoded)
+    print(f'{name}: {len(data)} bytes -> {len(encoded)} chars')
+"
+
+# 3. Generate QR code images (requires qrencode)
+qrencode -o /tmp/qr-v1.png -l L -s 4 < /tmp/qr-FarmerCredential.txt
+qrencode -o /tmp/qr-v2.png -l L -s 4 < /tmp/qr-FarmerCredentialV2.txt
+
+# 4. Open QR code image and Inji Verify UI
+xdg-open /tmp/qr-v1.png          # display QR on screen
+xdg-open http://localhost:3001    # open Inji Verify UI
+
+# 5. Scan the QR code with the Inji Verify UI scanner
+```
+
+The Inji Verify UI at `localhost:3001` routes verification requests through the adapter via nginx. The adapter decodes the PixelPass QR (Base45 → zlib → JSON-LD), resolves the Certify issuer's DID, and verifies the Ed25519Signature2020 proof.
+
+**Inji Verify UI rendering patch:** The Inji Verify UI 0.16.0 has hardcoded credential type renderers. It crashes with `Cannot read properties of undefined (reading 'farmerCredentialRenderOrder')` after successful verification because `FarmerCredential` is not in its built-in renderer switch. The verification succeeds (visible in the browser Network tab) but the UI fails to display the result. To fix, patch the JS to remove the `FarmerCredential` case so it falls through to the generic `default` renderer:
+
+```bash
+# Copy, patch, and replace the main JS bundle
+docker cp inji-verify-ui:/usr/share/nginx/html/static/js/main.b48651be.js /tmp/inji-verify-main.js
+
+python3 -c "
+with open('/tmp/inji-verify-main.js') as f: c = f.read()
+c = c.replace('case\"FarmerCredential\":return Nv(hv().farmerCredentialRenderOrder,a,t);', '')
+with open('/tmp/inji-verify-main.js', 'w') as f: f.write(c)
+print('Patched')
+"
+
+docker cp /tmp/inji-verify-main.js inji-verify-ui:/usr/share/nginx/html/static/js/main.b48651be.js
+# Hard refresh the browser: Ctrl+Shift+R
+```
+
+After patching, the UI uses its built-in default renderer which displays all credential subject fields generically.
+
+SD-JWT credentials (6441 chars) exceed the QR code capacity limit (~4296 bytes) due to the embedded x5c certificate chain. They can be verified via API:
+
+```bash
+curl -X POST http://localhost:8085/v1/verify/vc-verification \
+  -H "Content-Type: application/vc+sd-jwt" \
+  -d @/tmp/certify-FarmerCredentialSdJwt.jwt
+```
 
 ## Testing offline verification
 
@@ -181,19 +310,24 @@ The CBOR decoder maps integer keys to field names per the [Claim 169 specificati
 
 ### Full test results
 
+**Inji Certify issuance → verification (6 tests × 2 modes = 12 total):**
+
+| Format | Inji Verify direct | Adapter online | Adapter offline |
+| --- | --- | --- | --- |
+| VCDM v1.0 (`ldp_vc`, Ed25519Signature2020) | SUCCESS | SUCCESS | SUCCESS |
+| VCDM v2.0 (`ldp_vc`, Ed25519Signature2020) | SUCCESS | SUCCESS | SUCCESS |
+| SD-JWT (`vc+sd-jwt`, EdDSA, x5c) | SUCCESS | SUCCESS | SUCCESS |
+
+**Air-gap verification (`--network none`):**
+
+| Format | Result | Why |
+| --- | --- | --- |
+| LDP_VC | TRUSTED_ISSUER | Context fetch fails, structural check only |
+| SD-JWT (x5c) | **CRYPTOGRAPHIC** | x5c cert is self-contained, no network needed |
+
+**Other formats:**
+
 ```txt
-LDP_VC (Ed25519Signature2020)
-  Online (Inji):              SUCCESS (backend: inji-verify)
-  Offline (with network):     SUCCESS [CRYPTOGRAPHIC]
-  Air-gap (--network none):   SUCCESS [TRUSTED_ISSUER]
-                              (context fetch fails, structural check only)
-
-SD-JWT (EdDSA + x5c)
-  Online (Inji):              SUCCESS (backend: inji-verify)
-  Offline (with network):     SUCCESS [CRYPTOGRAPHIC]
-  Air-gap (--network none):   SUCCESS [CRYPTOGRAPHIC]
-                              (x5c cert is self-contained, no network needed)
-
 CBOR / Claim 169
   PixelPass decode:           Works (CBOR → JSON conversion)
   VC verification:            N/A (Claim 169 is not a W3C VC —
