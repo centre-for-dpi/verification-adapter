@@ -20,20 +20,23 @@ package main
 
 import (
 	"crypto"
+	stdecdsa "crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"log"
 	"math/big"
 	"strings"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	dcrsecp "github.com/decred/dcrd/dcrec/secp256k1/v4"
+	dcrecdsa "github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 	"github.com/mr-tron/base58"
 )
 
@@ -165,7 +168,7 @@ func verifySecp256k1(data, sig []byte, pubKeyHex string) (bool, error) {
 		return false, fmt.Errorf("sig: decode secp256k1 public key: %w", err)
 	}
 
-	pubKey, err := secp256k1.ParsePubKey(pubKeyBytes)
+	pubKey, err := dcrsecp.ParsePubKey(pubKeyBytes)
 	if err != nil {
 		return false, fmt.Errorf("sig: parse secp256k1 public key: %w", err)
 	}
@@ -174,16 +177,16 @@ func verifySecp256k1(data, sig []byte, pubKeyHex string) (bool, error) {
 	hash := sha256.Sum256(data)
 
 	// Try DER format first (most common in JWS).
-	if derSig, err := ecdsa.ParseDERSignature(sig); err == nil {
+	if derSig, err := dcrecdsa.ParseDERSignature(sig); err == nil {
 		return derSig.Verify(hash[:], pubKey), nil
 	}
 
 	// Try compact format (R || S, 64 bytes).
 	if len(sig) == 64 {
-		var r, s secp256k1.ModNScalar
+		var r, s dcrsecp.ModNScalar
 		r.SetByteSlice(sig[:32])
 		s.SetByteSlice(sig[32:])
-		compactSig := ecdsa.NewSignature(&r, &s)
+		compactSig := dcrecdsa.NewSignature(&r, &s)
 		return compactSig.Verify(hash[:], pubKey), nil
 	}
 
@@ -253,4 +256,107 @@ func parseRSAPublicKey(pubKeyHex string) (*rsa.PublicKey, error) {
 	}
 
 	return nil, fmt.Errorf("could not parse RSA key from %d bytes", len(keyBytes))
+}
+
+// ============================================================================
+// SD-JWT signature verification.
+// ============================================================================
+
+// VerifySDJWTSignature verifies an SD-JWT token offline by extracting the
+// issuer's public key from the x5c certificate in the JWT header and
+// verifying the JWS signature. No network access, no DID resolution,
+// no canonicalization — the certificate is self-contained in the token.
+//
+// Supports EdDSA (Ed25519) and ES256 (P-256) algorithms.
+func VerifySDJWTSignature(token string) (bool, error) {
+	// Strip trailing ~ and any disclosures for signature verification.
+	// SD-JWT format: <JWT>~<disclosure1>~<disclosure2>~
+	jwt := token
+	if idx := strings.Index(token, "~"); idx >= 0 {
+		jwt = token[:idx]
+	}
+
+	parts := strings.SplitN(jwt, ".", 3)
+	if len(parts) != 3 {
+		return false, fmt.Errorf("sdjwt: invalid JWT format (expected 3 parts, got %d)", len(parts))
+	}
+
+	// Decode header.
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return false, fmt.Errorf("sdjwt: decode header: %w", err)
+	}
+	var header struct {
+		Alg string   `json:"alg"`
+		Typ string   `json:"typ"`
+		X5C []string `json:"x5c"`
+		Kid string   `json:"kid"`
+	}
+	if err := json.Unmarshal(headerJSON, &header); err != nil {
+		return false, fmt.Errorf("sdjwt: parse header: %w", err)
+	}
+
+	log.Printf("[SIG] SD-JWT: alg=%s typ=%s x5c=%d certs", header.Alg, header.Typ, len(header.X5C))
+
+	// Extract public key from x5c certificate.
+	if len(header.X5C) == 0 {
+		return false, fmt.Errorf("sdjwt: no x5c certificate in JWT header (kid=%s)", header.Kid)
+	}
+
+	certDER, err := base64.StdEncoding.DecodeString(header.X5C[0])
+	if err != nil {
+		return false, fmt.Errorf("sdjwt: decode x5c certificate: %w", err)
+	}
+	cert, err := x509.ParseCertificate(certDER)
+	if err != nil {
+		return false, fmt.Errorf("sdjwt: parse x5c certificate: %w", err)
+	}
+
+	// Decode signature.
+	sigBytes, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return false, fmt.Errorf("sdjwt: decode signature: %w", err)
+	}
+
+	// The JWS signing input is: base64url(header) + "." + base64url(payload)
+	signingInput := []byte(parts[0] + "." + parts[1])
+
+	// Verify based on algorithm.
+	switch header.Alg {
+	case "EdDSA":
+		pubKey, ok := cert.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return false, fmt.Errorf("sdjwt: x5c certificate key is not Ed25519")
+		}
+		return ed25519.Verify(pubKey, signingInput, sigBytes), nil
+
+	case "ES256":
+		pubKey, ok := cert.PublicKey.(*stdecdsa.PublicKey)
+		if !ok {
+			return false, fmt.Errorf("sdjwt: x5c certificate key is not ECDSA")
+		}
+		if pubKey.Curve != elliptic.P256() {
+			return false, fmt.Errorf("sdjwt: expected P-256 curve, got %s", pubKey.Curve.Params().Name)
+		}
+		h := sha256.Sum256(signingInput)
+		// ES256 signature is R || S (32 bytes each).
+		if len(sigBytes) != 64 {
+			return false, fmt.Errorf("sdjwt: ES256 signature wrong size: %d (want 64)", len(sigBytes))
+		}
+		r := new(big.Int).SetBytes(sigBytes[:32])
+		s := new(big.Int).SetBytes(sigBytes[32:])
+		return stdecdsa.Verify(pubKey, h[:], r, s), nil
+
+	case "RS256":
+		pubKey, ok := cert.PublicKey.(*rsa.PublicKey)
+		if !ok {
+			return false, fmt.Errorf("sdjwt: x5c certificate key is not RSA")
+		}
+		h := sha256.Sum256(signingInput)
+		err := rsa.VerifyPKCS1v15(pubKey, crypto.SHA256, h[:], sigBytes)
+		return err == nil, nil
+
+	default:
+		return false, fmt.Errorf("sdjwt: unsupported algorithm: %s", header.Alg)
+	}
 }

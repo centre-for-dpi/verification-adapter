@@ -214,31 +214,46 @@ type Backend interface {
 │  eyJhbGciOiJFZERTQSIsInR5cCI6InZjK3NkLWp3dCIsIng1YyI6Wy4uLl19...~ │
 └──────────────┬───────────────────────────────────────────────────────┘
                │
-               ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  Adapter: raw passthrough                                            │
-│                                                                      │
-│  No JSON parsing. No canonicalization. The token string (including   │
-│  trailing ~) is forwarded to each backend in registration order      │
-│  with the original Content-Type preserved.                           │
-│                                                                      │
-│  First backend returning SUCCESS or INVALID wins.                    │
-└──────────────┬───────────────────────────────────────────────────────┘
+               ├─ Online (backend reachable)?
+               │
+               │   YES ↓
+               │   Raw passthrough to backend. No JSON parsing, no
+               │   canonicalization. Token string (including trailing ~)
+               │   forwarded with original Content-Type preserved.
+               │   First backend returning SUCCESS or INVALID wins.
+               │
+               │   Backend (Inji Verify): SdJwtVerifier
+               │     1. Parse JWT header → extract x5c cert chain
+               │     2. x5c[0] → X.509 certificate → extract public key
+               │     3. Verify EdDSA/ES256 signature over header.payload
+               │     4. Validate claims: _sd_alg, typ, alg
+               │     5. Validate disclosures against _sd digests
+               │
+               │     ⚠ Inji's SdJwtVerifier resolves keys from x5c only.
+               │       did:key/did:web in kid is not resolved.
+               │
+               │   NO (offline / forced offline) ↓
                │
                ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│  Backend (Inji Verify): SdJwtVerifier                                │
+│  Adapter: local SD-JWT verification (VerifySDJWTSignature)           │
 │                                                                      │
-│  1. Parse JWT header → extract x5c certificate chain                 │
-│  2. x5c[0] → X.509 certificate → extract public key                  │
-│  3. Verify EdDSA/ES256 signature over header.payload                 │
-│  4. Validate claims: _sd_alg, typ, alg                               │
-│  5. Validate disclosures against _sd digests                         │
+│  1. Strip trailing ~ and disclosures → extract JWT (header.payload.  │
+│     signature)                                                       │
+│  2. base64url decode header → extract alg and x5c certificate        │
+│  3. Parse X.509 certificate → extract public key                     │
+│  4. Verify signature over base64url(header) + "." + base64url(       │
+│     payload) using:                                                  │
+│       EdDSA → ed25519.Verify(pubKey, signingInput, sig)              │
+│       ES256 → ecdsa.Verify(pubKey, SHA256(signingInput), r, s)       │
+│       RS256 → rsa.VerifyPKCS1v15(pubKey, SHA256, hash, sig)          │
 │                                                                      │
-│  ⚠ Key resolution is x5c-only. did:key/did:web in kid header         │
-│    is not resolved — SdJwtVerifier does not call                     │
-│    PublicKeyResolverFactory. Issuer must embed X.509 cert in         │
-│    JWT header.                                                       │
+│  No network needed. No DID resolution. No context fetching.          │
+│  The public key is extracted from the x5c certificate embedded       │
+│  in the JWT header itself.                                           │
+│                                                                      │
+│  ✓ Works with --network none (true air-gap).                         │
+│    Tested: CRYPTOGRAPHIC SUCCESS with docker run --network none.     │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -289,19 +304,20 @@ First match wins. Inji Verify is registered before walt.id, so `did:web`/`did:ke
 
 ## Credential format support
 
-| Format | Online | Offline |
-| --- | --- | --- |
-| LDP_VC (Ed25519Signature2018) | Inji Verify, CREDEBL | CRYPTOGRAPHIC |
-| LDP_VC (Ed25519Signature2020) | Inji Verify, CREDEBL | CRYPTOGRAPHIC |
-| LDP_VC (EcdsaSecp256k1Signature2019) | CREDEBL | CRYPTOGRAPHIC |
-| LDP_VC (RsaSignature2018) | Inji Verify | CRYPTOGRAPHIC (if RSA key cached) |
-| SD-JWT (EdDSA, x5c in header) | Inji Verify | Not supported (passthrough only) |
-| SD-JWT (EdDSA, kid/DID) | Not supported by Inji 0.16.0 | Not supported |
-| JWT_VC_JSON | walt.id (OID4VP flow) | Not supported |
+| Format | Online | Offline | Air-gap (`--network none`) |
+| --- | --- | --- | --- |
+| LDP_VC (Ed25519Signature2018) | Inji Verify, CREDEBL | CRYPTOGRAPHIC | TRUSTED_ISSUER (context fetch fails) |
+| LDP_VC (Ed25519Signature2020) | Inji Verify, CREDEBL | CRYPTOGRAPHIC | TRUSTED_ISSUER (context fetch fails) |
+| LDP_VC (EcdsaSecp256k1Signature2019) | CREDEBL | CRYPTOGRAPHIC | TRUSTED_ISSUER (context fetch fails) |
+| LDP_VC (RsaSignature2018) | Inji Verify | CRYPTOGRAPHIC (if RSA key cached) | TRUSTED_ISSUER (context fetch fails) |
+| SD-JWT (EdDSA, x5c in header) | Inji Verify | CRYPTOGRAPHIC | **CRYPTOGRAPHIC** (x5c is self-contained) |
+| SD-JWT (ES256/RS256, x5c) | Inji Verify | CRYPTOGRAPHIC | **CRYPTOGRAPHIC** |
+| SD-JWT (kid/DID, no x5c) | Not supported by Inji 0.16.0 | Not supported | Not supported |
+| JWT_VC_JSON | walt.id (OID4VP flow) | Not supported | Not supported |
 
 ## Differences from the original Node.js adapter
 
-The [original nodejs adapter](../nodejs-credebl-inji-adapter/) is a 1500-line Node.js file hardcoded to CREDEBL Agent and Inji Verify. This standalone adapter preserves the same API surface and routing logic with two intentional changes:
+The [original adapter](../nodejs-credebl-inji-adapter/) is a 1500-line Node.js file hardcoded to CREDEBL Agent and Inji Verify. This standalone adapter preserves the same API surface and routing logic with two intentional changes:
 
 1. **Content-Type fix.** The original sends `application/json` with `{"verifiableCredentials": [cred]}` to Inji Verify. Inji's controller passes `@RequestBody String vc` to the verifier library — when the body is the wrapper object, parsing fails. The standalone sends the raw credential with `Content-Type: application/vc+ld+json`, matching the delegated-access-poc's approach.
 

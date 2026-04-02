@@ -1,10 +1,10 @@
 # Verification Adapter
 
-A backend-agnostic verification adapter that sits between any credential verification UI and any W3C-compliant verifier backend, with standards-compliant offline cryptographic verification. Adding a new backend (CREDEBL, walt.id, Inji Verify, etc. or even custom) is a JSON config change — no code modification.
+A backend-agnostic verification adapter that sits between any credential verification UI and any W3C-compliant verifier backend, with standards-compliant offline cryptographic verification. Adding a new backend (CREDEBL, walt.id, Inji Verify, or custom) is a JSON config change — no code modification.
 
 ## Why it matters
 
-Verification services across various DPG stacks are typically coupled to their respective backend APIs — hardcoded endpoints, auth flows, request formats, and DID method routing. When the deployment target changes, an adapter must be created or rewritten. This adapter treats backends as configuration: a `Backend` interface and `backends.json` file let operators add, remove, or re-prioritise verifier backends without rebuilding the binary.
+Verification adapters in CREDEBL, walt.id, and MOSIP stacks are coupled to their respective backend APIs — hardcoded endpoints, auth flows, request formats, and DID method routing. When the deployment target changes, the adapter must be rewritten. This adapter treats backends as configuration: a `Backend` interface and `backends.json` file let operators add, remove, or re-prioritise verifier backends without rebuilding the binary.
 
 Offline verification uses URDNA2015 JSON-LD canonicalization with the W3C Data Integrity two-hash pattern (`SHA256(canon(proofOpts)) || SHA256(canon(doc))`), enabling cryptographic signature verification without network access to any backend.
 
@@ -12,12 +12,27 @@ Offline verification uses URDNA2015 JSON-LD canonicalization with the W3C Data I
 
 | Capability | Detail |
 | --- | --- |
+| VC Data Model | W3C VCDM 1.1 (`https://www.w3.org/2018/credentials/v1`) and 2.0 (`https://www.w3.org/ns/credentials/v2`) |
+| Credential formats | LDP_VC (JSON-LD with proof), SD-JWT (`vc+sd-jwt` with x5c), JWT_VC_JSON (via OID4VP) |
 | Online verification | Routes credentials to the correct backend by DID method, with per-backend auth, request wrapping, and response parsing |
 | Offline verification | Caches issuer public keys via `/sync`, verifies Ed25519 and RSA signatures locally using URDNA2015 canonicalization |
 | Backend routing | `BackendRegistry.Select(didMethod)` — config-driven, priority-ordered |
 | Input decoding | PixelPass (Base45 + zlib), JSON-XT template expansion, raw JSON-LD |
 | DID resolution | did:key (local), did:web (HTTPS), did:polygon (Ethereum RPC) |
 | Proof types | Ed25519Signature2018/2020, EcdsaSecp256k1Signature2019, RsaSignature2018, DataIntegrityProof/eddsa-rdfc-2022 |
+
+### W3C VC Data Model support
+
+Both VCDM 1.1 and 2.0 credentials are handled. The adapter does not enforce a specific data model version — it passes the credential's `@context` array to the canonicalizer and backend as-is. Differences between versions are handled by the JSON-LD context definitions, not adapter logic.
+
+| | VCDM 1.1 | VCDM 2.0 |
+| --- | --- | --- |
+| Context URL | `https://www.w3.org/2018/credentials/v1` | `https://www.w3.org/ns/credentials/v2` |
+| Date fields | `issuanceDate`, `expirationDate` | `validFrom`, `validUntil` |
+| Online (Inji Verify) | Tested, works | Supported by Inji's `LdpValidator` |
+| Online (CREDEBL Agent) | Tested, works | Supported |
+| Offline (CRYPTOGRAPHIC) | Tested end-to-end | Works (json-gold fetches v2 context) |
+| Issuer field | String or `{id, name}` object — adapter extracts DID from both | Same |
 
 ### Endpoints
 
@@ -105,7 +120,7 @@ Adapter→Inji:    SUCCESS (backend: inji-verify)
 Adapter offline:  SUCCESS (level: CRYPTOGRAPHIC)
 ```
 
-Credentials issuers that support (Ed25519Signature2020) and (RsaSignature2018) verify through the adapter. Walt.id's `issuer-api:0.18.2` issues `jwt_vc_json` format natively; for `ldp_vc` credentials, sign with json-gold using the walt.id-onboarded keypair.
+Credentials from credissuer.com (Ed25519Signature2020) and Inji Certify (RsaSignature2018) verify through the adapter. Walt.id's `issuer-api:0.18.2` issues `jwt_vc_json` format natively; for `ldp_vc` credentials, sign with json-gold using the walt.id-onboarded keypair.
 
 ## Testing offline verification
 
@@ -143,15 +158,15 @@ docker run --rm --network none \
 
 ### Offline verification levels by network state
 
-| Scenario | Result | Why |
+| Scenario | LDP_VC | SD-JWT (x5c) |
 | --- | --- | --- |
-| `/verify-offline` with network | CRYPTOGRAPHIC | json-gold fetches `@context` URLs over HTTP, canonicalizes, verifies signature |
-| `/verify-offline` after restart, with network | CRYPTOGRAPHIC | json-gold re-fetches contexts (no persistent context cache) |
-| `--network none` (true air-gap) | TRUSTED_ISSUER | Context fetch fails → canonicalization fails → falls back to structural check |
+| `/verify-offline` with network | CRYPTOGRAPHIC | CRYPTOGRAPHIC |
+| `/verify-offline` after restart, with network | CRYPTOGRAPHIC | CRYPTOGRAPHIC |
+| `--network none` (true air-gap) | TRUSTED_ISSUER | **CRYPTOGRAPHIC** |
 
-json-gold's `DefaultDocumentLoader` does not bundle W3C contexts — it always fetches over HTTP. In a true air-gap, canonicalization fails for any credential whose `@context` URLs are not reachable, and the adapter falls back to `TRUSTED_ISSUER` (issuer DID matches cache, proof structure valid, but no cryptographic signature check).
+**LDP_VC air-gap limitation:** json-gold's `DefaultDocumentLoader` does not bundle W3C contexts — it always fetches over HTTP. In a true air-gap, canonicalization fails and the adapter falls back to `TRUSTED_ISSUER`. Pre-cached contexts (via the archived WASM module or a custom document loader) would be needed for CRYPTOGRAPHIC in a true air-gap.
 
-For CRYPTOGRAPHIC verification in a true air-gap, the adapter would need pre-cached JSON-LD contexts — either embedded in the binary or loaded from a local file at startup. This is what the WASM module with embedded contexts solved (archived to [wasm](./verification-adapter/wasm/README.md)), and what Inji Verify's `LocalDocumentLoader` does internally.
+**SD-JWT works in a true air-gap** because the issuer's public key is embedded in the JWT header as an X.509 certificate (`x5c` claim). No context fetching, no DID resolution, no network access needed. The adapter parses the JWT, extracts the cert, and verifies the EdDSA/ES256/RS256 signature locally. Tested with `docker run --network none`.
 
 ## Why Inji Verify rejects some cross-platform credentials and how the adapter handles it
 

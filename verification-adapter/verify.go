@@ -287,34 +287,43 @@ func (a *Adapter) SyncIssuer(did string) SyncResult {
 // SD-JWT verification — raw string passthrough to backend.
 // --------------------------------------------------------------------------
 
-// VerifySDJWT forwards an SD-JWT credential (raw string, not JSON) to a
-// backend that supports SD-JWT verification. The adapter does not parse or
-// canonicalize SD-JWT — it passes the token through with the correct
-// Content-Type. Offline SD-JWT verification is not supported (no JSON-LD
-// canonicalization involved).
+// VerifySDJWT verifies an SD-JWT credential. Online: forwards the raw token
+// to a backend. Offline: parses the JWT, extracts the x5c certificate from
+// the header, and verifies the signature locally.
 func (a *Adapter) VerifySDJWT(token string, contentType string, forceOffline bool) VerificationResult {
-	if forceOffline {
+	if !forceOffline {
+		// Try each reachable backend.
+		for _, b := range a.registry.All() {
+			log.Printf("[VERIFY] SD-JWT: trying backend %s", b.Name())
+			result := b.VerifyRaw(token, contentType)
+			if result.Status == "SUCCESS" || result.Status == "INVALID" {
+				result.Backend = b.Name()
+				return result
+			}
+			log.Printf("[VERIFY] SD-JWT: backend %s: %s", b.Name(), result.Error)
+		}
+	}
+
+	// Offline: verify locally using x5c certificate from JWT header.
+	log.Println("[VERIFY] SD-JWT: attempting offline verification")
+	valid, err := VerifySDJWTSignature(token)
+	if err != nil {
 		return VerificationResult{
-			Status:  "ERROR",
+			Status:  "INVALID",
 			Offline: true,
-			Error:   "SD-JWT offline verification not supported; requires online backend",
+			Error:   err.Error(),
 		}
 	}
-
-	// Try each reachable backend. SD-JWT verification is not DID-method-specific.
-	for _, b := range a.registry.All() {
-		log.Printf("[VERIFY] SD-JWT: trying backend %s", b.Name())
-		result := b.VerifyRaw(token, contentType)
-		if result.Status == "SUCCESS" || result.Status == "INVALID" {
-			result.Backend = b.Name()
-			return result
+	if !valid {
+		return VerificationResult{
+			Status:  "INVALID",
+			Offline: true,
 		}
-		log.Printf("[VERIFY] SD-JWT: backend %s: %s", b.Name(), result.Error)
 	}
-
 	return VerificationResult{
-		Status: "ERROR",
-		Error:  "no backend could verify SD-JWT credential",
+		Status:  "SUCCESS",
+		Offline: true,
+		Level:   "CRYPTOGRAPHIC",
 	}
 }
 
