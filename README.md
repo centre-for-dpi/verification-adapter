@@ -243,7 +243,7 @@ docker cp /tmp/inji-verify-main.js inji-verify-ui:/usr/share/nginx/html/static/j
 
 After patching, the UI uses its built-in default renderer which displays all credential subject fields generically.
 
-SD-JWT credentials (6441 chars) exceed the QR code capacity limit (~4296 bytes) due to the embedded x5c certificate chain. They can be verified via API:
+SD-JWT credentials cannot be tested via QR scan. At 6441 chars, they exceed the QR code capacity limit (~4296 bytes). The bulk of the size is the x5c certificate chain embedded in the JWT header — 2667 bytes of X.509 DER certificate, base64-encoded to 4954 chars, accounting for 77% of the total token. The actual credential payload is only ~1400 chars. SD-JWT credentials can be verified via API instead:
 
 ```bash
 curl -X POST http://localhost:8085/v1/verify/vc-verification \
@@ -318,12 +318,13 @@ The CBOR decoder maps integer keys to field names per the [Claim 169 specificati
 | VCDM v2.0 (`ldp_vc`, Ed25519Signature2020) | SUCCESS | SUCCESS | SUCCESS |
 | SD-JWT (`vc+sd-jwt`, EdDSA, x5c) | SUCCESS | SUCCESS | SUCCESS |
 
-**Air-gap verification (`--network none`):**
+**True air-gap verification (`docker run --network none`, pre-cached issuer key):**
 
-| Format | Result | Why |
-| --- | --- | --- |
-| LDP_VC | TRUSTED_ISSUER | Context fetch fails, structural check only |
-| SD-JWT (x5c) | **CRYPTOGRAPHIC** | x5c cert is self-contained, no network needed |
+| Format | Status | Level | Why |
+| --- | --- | --- | --- |
+| VCDM v1.0 (`ldp_vc`) | SUCCESS | TRUSTED_ISSUER | Context fetch fails (no network) → canonicalization fails → structural validation passes |
+| VCDM v2.0 (`ldp_vc`) | SUCCESS | TRUSTED_ISSUER | Same — `credentials/v2` context unreachable |
+| SD-JWT (`vc+sd-jwt`, x5c) | SUCCESS | **CRYPTOGRAPHIC** | x5c cert is self-contained in JWT header — no network needed |
 
 **Other formats:**
 

@@ -438,16 +438,24 @@ The SD-JWT template must NOT include `iss`, `iat`, `exp` — Certify adds these 
 
 ### Physical QR code testing
 
-LDP_VC credentials (1882–2244 bytes) compress to 1715–1853 chars via PixelPass (Base45 + zlib) and fit in a QR code. SD-JWT credentials (6441 chars) exceed the QR limit due to the embedded x5c certificate chain (2667 bytes DER → 4954 chars base64 in the JWT header).
+LDP_VC credentials (1882–2244 bytes) compress to 1715–1853 chars via PixelPass (Base45 + zlib) and fit in a QR code. SD-JWT credentials (6441 chars) cannot be QR-encoded — they exceed the QR capacity limit (~4296 bytes). The x5c certificate chain in the JWT header accounts for 77% of the token size (2667 bytes DER → 4954 chars base64). The actual credential payload is only ~1400 chars. SD-JWT verification is tested via API calls only, not QR scanning.
 
 The Inji Verify UI at `:3001` scans QR codes and routes verification through the adapter via nginx proxy. The `test/inji-ui/nginx.conf` forwards `/v1/verify/vc-verification` to `adapter:8085`.
 
 ### Test results
 
-All 12 tests pass (3 formats × 2 verification paths × 2 modes):
+**Online + offline with cached key (6 tests × 2 modes = 12 total):**
 
 | Format | Inji Verify direct | Adapter online | Adapter offline |
 | --- | --- | --- | --- |
 | VCDM v1.0 (ldp_vc) | SUCCESS | SUCCESS | SUCCESS |
 | VCDM v2.0 (ldp_vc) | SUCCESS | SUCCESS | SUCCESS |
 | SD-JWT (vc+sd-jwt) | SUCCESS | SUCCESS | SUCCESS |
+
+**True air-gap (`docker run --network none`, pre-cached issuer key):**
+
+| Format | Status | Level | Why |
+| --- | --- | --- | --- |
+| VCDM v1.0 (`ldp_vc`) | SUCCESS | TRUSTED_ISSUER | Context fetch fails (no network) → canonicalization fails → structural validation passes |
+| VCDM v2.0 (`ldp_vc`) | SUCCESS | TRUSTED_ISSUER | Same — `credentials/v2` context unreachable |
+| SD-JWT (`vc+sd-jwt`, x5c) | SUCCESS | **CRYPTOGRAPHIC** | x5c cert is self-contained in JWT header — no network needed |
